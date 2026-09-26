@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Classroom Attendance</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f4f6f8;
+            padding: 20px;
+            max-width: 480px;
+            margin: auto;
+        }
+
+        .card {
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 24px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        }
+
+        .instructions {
+            background: #e8f0fe;
+            border-left: 4px solid #1a73e8;
+            padding: 12px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            line-height: 1.5;
+            border-radius: 0 4px 4px 0;
+        }
+
+        .field {
+            margin-bottom: 16px;
+        }
+
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 6px;
+            font-size: 14px;
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-size: 15px;
+        }
+
+        button {
+            width: 100%;
+            padding: 12px;
+            background: #1a73e8;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        #status {
+            margin-top: 15px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        #qrSection {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }
+
+        #qrcode {
+            display: inline-block;
+            margin: 15px 0;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="card">
+        <!-- TEACHER VIEW (Shown when no ?sheetId= in URL) -->
+        <div id="teacherView" style="display: none;">
+            <h2 style="margin-top:0; color:#1a73e8;">Attendance Setup Portal</h2>
+            <div class="instructions">
+                <strong>Instructions:</strong>
+                <ol style="margin: 8px 0 0 0; padding-left: 20px;">
+                    <li>Create a new blank <a href="https://sheets.new" target="_blank">Google Sheet</a>.</li>
+                    <li>Click <strong>Share</strong> and add the administrator's email as an <strong>Editor</strong>.
+                    </li>
+                    <li>Paste your Google Sheet link below and click <strong>Generate QR Code</strong>.</li>
+                </ol>
+            </div>
+
+            <div class="field">
+                <label>Paste Your Google Sheet Link:</label>
+                <input type="text" id="sheetInput" placeholder="https://docs.google.com/spreadsheets/d/.../edit"
+                    required>
+            </div>
+
+            <button onclick="generateTeacherQR()">Generate Classroom QR Code</button>
+
+            <div id="qrSection">
+                <h3>Scan to Mark Attendance</h3>
+                <div id="qrcode"></div>
+                <p style="font-size: 13px; color: #555;">Project this QR code on the lecture screen.</p>
+            </div>
+        </div>
+
+        <!-- STUDENT VIEW (Shown when scanning QR code) -->
+        <div id="studentView" style="display: none;">
+            <h2 style="margin-top:0;">Attendance</h2>
+
+            <div class="field">
+                <label>Student ID:</label>
+                <input type="text" id="studentId" placeholder="e.g., 20241089" required>
+            </div>
+
+            <div class="field">
+                <label>Full Name:</label>
+                <input type="text" id="studentName" placeholder="e.g., Alex Johnson" required>
+            </div>
+
+            <div class="field">
+                <label>Group Number:</label>
+                <input type="text" id="studentGroup" placeholder="e.g., Group 3 or Section B" required>
+            </div>
+
+            <button id="submitBtn" onclick="submitAttendance()">Submit Attendance</button>
+            <div id="status"></div>
+        </div>
+    </div>
+
+    <script>
+        // Paste your Apps Script Web App URL here:
+        const CENTRAL_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbw2r6H-uQvYVVUR2kT6oMDzWfdKJeCOxtlhSqv6EKQQs6cfuXegUqA-KShWu-NvsgKc/exec";
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const TARGET_SHEET_ID = urlParams.get('sheetId');
+
+        window.onload = function () {
+            if (!TARGET_SHEET_ID) {
+                document.getElementById("teacherView").style.display = "block";
+            } else {
+                document.getElementById("studentView").style.display = "block";
+            }
+        };
+
+        // Teacher QR Generator
+        function extractSheetId(input) {
+            input = input.trim();
+            const match = input.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+            return match ? match[1] : input;
+        }
+
+        function generateTeacherQR() {
+            const rawInput = document.getElementById("sheetInput").value;
+            const sheetId = extractSheetId(rawInput);
+
+            if (!sheetId) {
+                alert("Please paste a valid Google Sheet link.");
+                return;
+            }
+
+            const qrUrl = window.location.origin + window.location.pathname + `?sheetId=${sheetId}`;
+            const qrContainer = document.getElementById("qrcode");
+            qrContainer.innerHTML = "";
+            new QRCode(qrContainer, { text: qrUrl, width: 256, height: 256 });
+            document.getElementById("qrSection").style.display = "block";
+        }
+
+        // Student Form Submission
+        function submitAttendance() {
+            const status = document.getElementById("status");
+            const studentId = document.getElementById("studentId").value.trim();
+            const name = document.getElementById("studentName").value.trim();
+            const group = document.getElementById("studentGroup").value.trim();
+
+            if (!studentId || !name || !group) {
+                status.textContent = "Please fill in all fields.";
+                status.style.color = "red";
+                return;
+            }
+
+            status.textContent = "Recording GPS location...";
+            status.style.color = "#444";
+
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    status.textContent = "Submitting attendance...";
+
+                    const payload = JSON.stringify({
+                        sheetId: TARGET_SHEET_ID,
+                        studentId: studentId,
+                        name: name,
+                        group: group,
+                        latitude: pos.coords.latitude,
+                        longitude: pos.coords.longitude
+                    });
+
+                    fetch(CENTRAL_SCRIPT_URL, {
+                        method: "POST",
+                        mode: "no-cors",
+                        headers: {
+                            "Content-Type": "application/x-www-form-urlencoded"
+                        },
+                        body: payload
+                    })
+                        .then(() => {
+                            status.textContent = "Attendance marked successfully!";
+                            status.style.color = "green";
+                            document.getElementById("studentId").value = "";
+                            document.getElementById("studentName").value = "";
+                            document.getElementById("studentGroup").value = "";
+                            document.getElementById("submitBtn").disabled = true;
+                        })
+                        .catch(() => {
+                            status.textContent = "Submission failed. Please check connection and retry.";
+                            status.style.color = "red";
+                        });
+                },
+                (err) => {
+                    status.textContent = "Location permission is required to submit. Please allow GPS.";
+                    status.style.color = "red";
+                },
+                { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+            );
+        }
+    </script>
+</body>
+
+</html>
