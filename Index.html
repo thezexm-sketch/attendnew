@@ -1,0 +1,220 @@
+/**
+ * Attendance System - Apps Script Backend
+ * -----------------------------------------
+ * Works with the "green" attendance front-end (sheetId, start/end session,
+ * deviceUuid duplicate protection, session status check).
+ *
+ * SETUP:
+ * 1. Open script.google.com -> New Project, paste this whole file in.
+ * 2. Deploy -> New deployment -> type: Web app.
+ *    - Execute as: Me
+ *    - Who has access: Anyone
+ * 3. Copy the deployment /exec URL and put it in APPS_SCRIPT_URL in the
+ *    front-end HTML file.
+ * 4. The target Google Sheet does NOT need any special setup — this script
+ *    will create/use a sheet tab called "Attendance" and a "Sessions" tab
+ *    automatically the first time it runs, inside the spreadsheet whose ID
+ *    is passed as sheetId.
+ */
+
+const ATTENDANCE_SHEET_NAME = "Attendance";
+const SESSIONS_SHEET_NAME = "Sessions";
+
+const ATTENDANCE_HEADERS = [
+  "Timestamp", "StudentID", "Name", "Group",
+  "Latitude", "Longitude", "Accuracy", "DeviceUUID"
+];
+
+const SESSIONS_HEADERS = ["SheetID", "Start", "End", "CreatedAt"];
+
+/* ============== ENTRY POINTS ============== */
+
+function doGet(e) {
+  const action = e.parameter.action;
+  const sheetId = e.parameter.sheetId;
+
+  if (!sheetId) {
+    return jsonOut({ status: "error", message: "Missing sheetId." });
+  }
+
+  try {
+    if (action === "create") {
+      return handleCreate(e, sheetId);
+    } else if (action === "session") {
+      return handleSessionCheck(sheetId);
+    } else {
+      return jsonOut({ status: "error", message: "Unknown action." });
+    }
+  } catch (err) {
+    return jsonOut({ status: "error", message: String(err) });
+  }
+}
+
+function doPost(e) {
+  try {
+    const data = JSON.parse(e.postData.contents);
+    return handleSubmit(data);
+  } catch (err) {
+    return jsonOut({ status: "error", message: String(err) });
+  }
+}
+
+/* ============== TEACHER: CREATE SESSION ============== */
+
+function handleCreate(e, sheetId) {
+  const start = Number(e.parameter.start || 0);
+  const end = Number(e.parameter.end || 0);
+
+  const ss = SpreadsheetApp.openById(sheetId);
+  const sessionsSheet = getOrCreateSheet(ss, SESSIONS_SHEET_NAME, SESSIONS_HEADERS);
+
+  // One session row per sheetId — overwrite if it already exists.
+  const data = sessionsSheet.getDataRange().getValues();
+  let rowIndex = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === sheetId) {
+      rowIndex = i + 1; // 1-indexed for sheet API
+      break;
+    }
+  }
+
+  const now = new Date();
+  if (rowIndex > 0) {
+    sessionsSheet.getRange(rowIndex, 1, 1, 4).setValues([[sheetId, start, end, now]]);
+  } else {
+    sessionsSheet.appendRow([sheetId, start, end, now]);
+  }
+
+  // Make sure the Attendance tab exists too.
+  getOrCreateSheet(ss, ATTENDANCE_SHEET_NAME, ATTENDANCE_HEADERS);
+
+  const mode = (start && end) ? "timed" : "open";
+  return jsonOut({ status: "success", mode: mode });
+}
+
+/* ============== STUDENT: CHECK SESSION STATUS ============== */
+
+function handleSessionCheck(sheetId) {
+  const ss = SpreadsheetApp.openById(sheetId);
+  const sessionsSheet = ss.getSheetByName(SESSIONS_SHEET_NAME);
+
+  if (!sessionsSheet) {
+    // No session ever created -> treat as open (no restriction configured).
+    return jsonOut({ status: "open" });
+  }
+
+  const data = sessionsSheet.getDataRange().getValues();
+  let session = null;
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === sheetId) {
+      session = { start: Number(data[i][1]) || 0, end: Number(data[i][2]) || 0 };
+      break;
+    }
+  }
+
+  if (!session) {
+    return jsonOut({ status: "open" });
+  }
+
+  const now = Date.now();
+
+  if (!session.start && !session.end) {
+    return jsonOut({ status: "open" });
+  }
+
+  if (now < session.start) {
+    return jsonOut({ status: "closed", message: "Attendance session has not started yet." });
+  }
+
+  if (now > session.end) {
+    return jsonOut({ status: "closed", message: "Attendance session has ended." });
+  }
+
+  return jsonOut({ status: "open" });
+}
+
+/* ============== STUDENT: SUBMIT ATTENDANCE ============== */
+
+function handleSubmit(data) {
+  const sheetId = data.sheetId;
+  const studentId = String(data.studentId || "").trim();
+  const name = String(data.name || "").trim();
+  const group = String(data.group || "").trim();
+  const deviceUuid = String(data.deviceUuid || "").trim();
+  const latitude = data.latitude;
+  const longitude = data.longitude;
+  const accuracy = data.accuracy;
+
+  if (!sheetId || !studentId || !name || !group) {
+    return jsonOut({ status: "error", message: "Missing required fields." });
+  }
+
+  const ss = SpreadsheetApp.openById(sheetId);
+
+  // Re-check session window server-side too (don't trust the client only).
+  const sessionsSheet = ss.getSheetByName(SESSIONS_SHEET_NAME);
+  if (sessionsSheet) {
+    const sdata = sessionsSheet.getDataRange().getValues();
+    for (let i = 1; i < sdata.length; i++) {
+      if (sdata[i][0] === sheetId) {
+        const start = Number(sdata[i][1]) || 0;
+        const end = Number(sdata[i][2]) || 0;
+        const now = Date.now();
+        if (start && now < start) {
+          return jsonOut({ status: "not_started", message: "Attendance session has not started yet." });
+        }
+        if (end && now > end) {
+          return jsonOut({ status: "expired", message: "Attendance session has ended." });
+        }
+        break;
+      }
+    }
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const attendanceSheet = getOrCreateSheet(ss, ATTENDANCE_SHEET_NAME, ATTENDANCE_HEADERS);
+    const rows = attendanceSheet.getDataRange().getValues();
+
+    // Duplicate check: same StudentID OR same DeviceUUID already recorded.
+    for (let i = 1; i < rows.length; i++) {
+      const existingStudentId = String(rows[i][1]);
+      const existingDeviceUuid = String(rows[i][7]);
+
+      if (existingStudentId === studentId) {
+        return jsonOut({ status: "duplicate", message: "Attendance already recorded for this Student ID." });
+      }
+      if (deviceUuid && existingDeviceUuid === deviceUuid) {
+        return jsonOut({ status: "duplicate_device", message: "This device has already been used to submit attendance." });
+      }
+    }
+
+    attendanceSheet.appendRow([
+      new Date(), studentId, name, group,
+      latitude || "", longitude || "", accuracy || "", deviceUuid || ""
+    ]);
+
+    return jsonOut({ status: "success", message: "Attendance recorded successfully." });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* ============== HELPERS ============== */
+
+function getOrCreateSheet(ss, name, headers) {
+  let sheet = ss.getSheetByName(name);
+  if (!sheet) {
+    sheet = ss.insertSheet(name);
+    sheet.appendRow(headers);
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function jsonOut(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
